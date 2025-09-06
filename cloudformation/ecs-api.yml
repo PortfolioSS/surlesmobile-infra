@@ -55,17 +55,32 @@ Resources:
           Secrets:
             - Name: ConnectionStrings__Default
               ValueFrom: !Ref DbConnSecretArn
-  SG:
+  ALBSG:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: ALB -> ECS
+      GroupDescription: ALB security group
       VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+  EcsSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS security group
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref ALBSG
   ALB:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Scheme: internet-facing
       Subnets: !Ref Subnets
-      SecurityGroups: [ !Ref SG ]
+      SecurityGroups: [ !Ref ALBSG ]
   TG:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -83,6 +98,7 @@ Resources:
       DefaultActions: [{ Type: forward, TargetGroupArn: !Ref TG }]
   Service:
     Type: AWS::ECS::Service
+    DependsOn: Listener
     Properties:
       Cluster: !Ref Cluster
       LaunchType: FARGATE
@@ -91,7 +107,7 @@ Resources:
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
-          SecurityGroups: [ !Ref SG ]
+          SecurityGroups: [ !Ref EcsSG ]
           Subnets: !Ref Subnets
       LoadBalancers:
         - ContainerName: api
