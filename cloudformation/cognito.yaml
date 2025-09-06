@@ -1,0 +1,333 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Cognito User Pool with admin/editor/viewer groups'
+
+Parameters:
+  Environment:
+    Type: String
+  ProjectName:
+    Type: String
+
+Resources:
+  # Cognito User Pool
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${ProjectName}-${Environment}-users'
+      AliasAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          TemporaryPasswordValidityDays: 7
+      MfaConfiguration: OPTIONAL
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+        - SMS_MFA
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+          - Name: verified_phone_number
+            Priority: 2
+      UserPoolTags:
+        Environment: !Ref Environment
+        Project: !Ref ProjectName
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: false
+          Required: true
+        - Name: given_name
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+        - Name: family_name
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+        - Name: role
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+      LambdaConfig:
+        PreSignUp: !GetAtt PreSignUpLambda.Arn
+
+  # User Pool Client
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub '${ProjectName}-${Environment}-web-client'
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      RefreshTokenValidity: 30
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+      SupportedIdentityProviders:
+        - COGNITO
+      CallbackURLs:
+        - http://localhost:4200
+        - https://localhost:4200
+      LogoutURLs:
+        - http://localhost:4200
+        - https://localhost:4200
+      AllowedOAuthFlows:
+        - code
+        - implicit
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+      AllowedOAuthFlowsUserPoolClient: true
+
+  # User Pool Domain
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub '${ProjectName}-${Environment}-auth-${AWS::AccountId}'
+      UserPoolId: !Ref UserPool
+
+  # Admin Group
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: admin
+      Description: Administrators with full access
+      UserPoolId: !Ref UserPool
+      Precedence: 1
+      RoleArn: !GetAtt AdminRole.Arn
+
+  # Editor Group
+  EditorGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: editor
+      Description: Editors with content management access
+      UserPoolId: !Ref UserPool
+      Precedence: 2
+      RoleArn: !GetAtt EditorRole.Arn
+
+  # Viewer Group
+  ViewerGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: viewer
+      Description: Viewers with read-only access
+      UserPoolId: !Ref UserPool
+      Precedence: 3
+      RoleArn: !GetAtt ViewerRole.Arn
+
+  # IAM Roles for Groups
+  AdminRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-cognito-admin-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'cognito-identity.amazonaws.com:aud': !Ref IdentityPool
+              'ForAnyValue:StringLike':
+                'cognito-identity.amazonaws.com:amr': authenticated
+      Policies:
+        - PolicyName: AdminAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminListGroupsForUser
+                Resource: '*'
+
+  EditorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-cognito-editor-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'cognito-identity.amazonaws.com:aud': !Ref IdentityPool
+              'ForAnyValue:StringLike':
+                'cognito-identity.amazonaws.com:amr': authenticated
+      Policies:
+        - PolicyName: EditorAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: '*'
+
+  ViewerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-cognito-viewer-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'cognito-identity.amazonaws.com:aud': !Ref IdentityPool
+              'ForAnyValue:StringLike':
+                'cognito-identity.amazonaws.com:amr': authenticated
+      Policies:
+        - PolicyName: ViewerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: '*'
+
+  # Identity Pool
+  IdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: !Sub '${ProjectName}_${Environment}_identity_pool'
+      AllowUnauthenticatedIdentities: false
+      CognitoIdentityProviders:
+        - ClientId: !Ref UserPoolClient
+          ProviderName: !GetAtt UserPool.ProviderName
+
+  # Identity Pool Role Attachment
+  IdentityPoolRoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref IdentityPool
+      Roles:
+        authenticated: !GetAtt ViewerRole.Arn
+      RoleMappings:
+        UserPoolProvider:
+          Type: Token
+          AmbiguousRoleResolution: Deny
+          IdentityProvider: !Sub '${UserPool.ProviderName}:${UserPoolClient}'
+          RulesConfiguration:
+            Rules:
+              - Claim: 'cognito:groups'
+                MatchType: Contains
+                Value: admin
+                RoleARN: !GetAtt AdminRole.Arn
+              - Claim: 'cognito:groups'
+                MatchType: Contains
+                Value: editor
+                RoleARN: !GetAtt EditorRole.Arn
+              - Claim: 'cognito:groups'
+                MatchType: Contains
+                Value: viewer
+                RoleARN: !GetAtt ViewerRole.Arn
+
+  # Pre-signup Lambda
+  PreSignUpLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  PreSignUpLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-cognito-pre-signup'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt PreSignUpLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          
+          def lambda_handler(event, context):
+              # Auto-confirm all users for development
+              # In production, you might want to add email verification logic
+              event['response']['autoConfirmUser'] = True
+              event['response']['autoVerifyEmail'] = True
+              
+              # Add default role if not present
+              if 'custom:role' not in event['request']['userAttributes']:
+                  event['response']['userAttributes'] = {
+                      'custom:role': 'viewer'
+                  }
+              
+              return event
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Lambda Permission for Cognito
+  PreSignUpLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PreSignUpLambda
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+Outputs:
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref UserPoolClient
+
+  UserPoolArn:
+    Description: Cognito User Pool ARN
+    Value: !GetAtt UserPool.Arn
+
+  UserPoolProviderName:
+    Description: Cognito User Pool Provider Name
+    Value: !GetAtt UserPool.ProviderName
+
+  UserPoolDomain:
+    Description: Cognito User Pool Domain
+    Value: !Sub 'https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com'
+
+  IdentityPoolId:
+    Description: Cognito Identity Pool ID
+    Value: !Ref IdentityPool

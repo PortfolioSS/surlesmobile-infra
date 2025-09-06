@@ -1,0 +1,45 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Cognito User Pool + Hosted UI + Groups (admin/editor/viewer)
+Parameters:
+  DomainPrefix: { Type: String, Default: surlesmobile-auth }
+Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: surlesmobile-pool
+      UsernameAttributes: [ email ]
+      AutoVerifiedAttributes: [ email ]
+      Policies: { PasswordPolicy: { MinimumLength: 12 } }
+      Schema: [{ Name: email, Required: true }]
+      Tags: { Name: surlesmobile-cognito }
+  Domain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties: { Domain: !Ref DomainPrefix, UserPoolId: !Ref UserPool }
+  ResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties:
+      Identifier: portfolio
+      Name: Portfolio API
+      UserPoolId: !Ref UserPool
+      Scopes:
+        - { ScopeName: read,  ScopeDescription: Read }
+        - { ScopeName: write, ScopeDescription: Write }
+        - { ScopeName: admin, ScopeDescription: Admin }
+  Client:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: portfolio-spa
+      AllowedOAuthFlows: [ code ]
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes: [ openid, email, portfolio/read, portfolio/write, portfolio/admin ]
+      CallbackURLs: [ 'https://surlesmobile.com/callback', 'http://localhost:4200/callback' ]
+      LogoutURLs: [ 'https://surlesmobile.com', 'http://localhost:4200' ]
+      GenerateSecret: false
+  AdminGroup:  { Type: AWS::Cognito::UserPoolGroup, Properties: { GroupName: admin,  UserPoolId: !Ref UserPool, Precedence: 1 } }
+  EditorGroup: { Type: AWS::Cognito::UserPoolGroup, Properties: { GroupName: editor, UserPoolId: !Ref UserPool, Precedence: 2 } }
+  ViewerGroup: { Type: AWS::Cognito::UserPoolGroup, Properties: { GroupName: viewer, UserPoolId: !Ref UserPool, Precedence: 3 } }
+Outputs:
+  PoolId: { Value: !Ref UserPool }
+  ClientId: { Value: !Ref Client }
+  Domain: { Value: !Ref Domain }

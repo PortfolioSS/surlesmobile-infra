@@ -1,0 +1,280 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'RDS PostgreSQL database with backup and monitoring'
+
+Parameters:
+  Environment:
+    Type: String
+  ProjectName:
+    Type: String
+  VPCId:
+    Type: String
+  PrivateSubnetIds:
+    Type: CommaDelimitedList
+  DatabaseSecurityGroupId:
+    Type: String
+  DBPassword:
+    Type: String
+    NoEcho: true
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, 'prod']
+
+Resources:
+  # DB Subnet Group
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub '${ProjectName}-${Environment}-db-subnet-group'
+      DBSubnetGroupDescription: Subnet group for RDS database
+      SubnetIds: !Ref PrivateSubnetIds
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-db-subnet-group'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # DB Parameter Group
+  DBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Family: postgres15
+      Description: !Sub 'PostgreSQL parameter group for ${ProjectName}-${Environment}'
+      Parameters:
+        shared_preload_libraries: 'pg_stat_statements'
+        log_statement: 'all'
+        log_min_duration_statement: '1000'
+        log_checkpoints: '1'
+        log_connections: '1'
+        log_disconnections: '1'
+        log_lock_waits: '1'
+        log_temp_files: '0'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-db-params'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # KMS Key for RDS encryption
+  DBEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub 'KMS key for ${ProjectName}-${Environment} RDS encryption'
+      KeyPolicy:
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+              - kms:CreateGrant
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-db-key'
+        - Key: Environment
+          Value: !Ref Environment
+
+  DBEncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${ProjectName}-${Environment}-db-key'
+      TargetKeyId: !Ref DBEncryptionKey
+
+  # RDS Instance
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: !If [IsProduction, Snapshot, Delete]
+    Properties:
+      DBInstanceIdentifier: !Sub '${ProjectName}-${Environment}-db'
+      DBName: portfoliodb
+      DBInstanceClass: !If [IsProduction, 'db.t3.small', 'db.t3.micro']
+      Engine: postgres
+      EngineVersion: '15.4'
+      AllocatedStorage: !If [IsProduction, 100, 20]
+      MaxAllocatedStorage: !If [IsProduction, 1000, 100]
+      StorageType: gp2
+      StorageEncrypted: true
+      KmsKeyId: !Ref DBEncryptionKey
+      
+      MasterUsername: portfoliouser
+      MasterUserPassword: !Ref DBPassword
+      
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroupId
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBParameterGroupName: !Ref DBParameterGroup
+      
+      BackupRetentionPeriod: !If [IsProduction, 7, 3]
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:00-sun:05:00'
+      
+      MultiAZ: !If [IsProduction, true, false]
+      PubliclyAccessible: false
+      
+      MonitoringInterval: !If [IsProduction, 60, 0]
+      MonitoringRoleArn: !If
+        - IsProduction
+        - !GetAtt RDSEnhancedMonitoringRole.Arn
+        - !Ref 'AWS::NoValue'
+      
+      EnablePerformanceInsights: !If [IsProduction, true, false]
+      PerformanceInsightsRetentionPeriod: !If [IsProduction, 7, !Ref 'AWS::NoValue']
+      PerformanceInsightsKMSKeyId: !If [IsProduction, !Ref DBEncryptionKey, !Ref 'AWS::NoValue']
+      
+      DeletionProtection: !If [IsProduction, true, false]
+      
+      EnableCloudwatchLogsExports:
+        - postgresql
+      
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-db'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Enhanced Monitoring Role (for production)
+  RDSEnhancedMonitoringRole:
+    Type: AWS::IAM::Role
+    Condition: IsProduction
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Read Replica (for production)
+  DBReadReplica:
+    Type: AWS::RDS::DBInstance
+    Condition: IsProduction
+    Properties:
+      DBInstanceIdentifier: !Sub '${ProjectName}-${Environment}-db-replica'
+      SourceDBInstanceIdentifier: !Ref DBInstance
+      DBInstanceClass: 'db.t3.small'
+      PubliclyAccessible: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-db-replica'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # DB Snapshot for manual backups
+  DBManualSnapshot:
+    Type: AWS::RDS::DBSnapshot
+    Condition: IsProduction
+    Properties:
+      DBSnapshotIdentifier: !Sub '${ProjectName}-${Environment}-initial-snapshot'
+      DBInstanceIdentifier: !Ref DBInstance
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-initial-snapshot'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # CloudWatch Alarms
+  DatabaseCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-db-cpu-high'
+      AlarmDescription: 'Database CPU utilization is too high'
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DBInstance
+      TreatMissingData: notBreaching
+
+  DatabaseConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-db-connections-high'
+      AlarmDescription: 'Database connections are too high'
+      MetricName: DatabaseConnections
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 50
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DBInstance
+      TreatMissingData: notBreaching
+
+  DatabaseFreeableMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-db-memory-low'
+      AlarmDescription: 'Database freeable memory is too low'
+      MetricName: FreeableMemory
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 536870912  # 512MB in bytes
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DBInstance
+      TreatMissingData: notBreaching
+
+  # SSM Parameter for connection string
+  DBConnectionStringParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${ProjectName}/${Environment}/database/connection-string'
+      Type: SecureString
+      Value: !Sub 
+        - 'Host=${DBEndpoint};Port=${DBPort};Database=portfoliodb;Username=portfoliouser;Password=${DBPassword};SSL Mode=Require;'
+        - DBEndpoint: !GetAtt DBInstance.Endpoint.Address
+          DBPort: !GetAtt DBInstance.Endpoint.Port
+      Description: 'PostgreSQL connection string'
+      Tags:
+        Environment: !Ref Environment
+        Project: !Ref ProjectName
+
+Outputs:
+  DBInstanceId:
+    Description: RDS Database Instance ID
+    Value: !Ref DBInstance
+
+  DBEndpoint:
+    Description: RDS Database Endpoint
+    Value: !GetAtt DBInstance.Endpoint.Address
+
+  DBPort:
+    Description: RDS Database Port
+    Value: !GetAtt DBInstance.Endpoint.Port
+
+  DBName:
+    Description: Database Name
+    Value: portfoliodb
+
+  DBConnectionStringParameterName:
+    Description: SSM Parameter name for connection string
+    Value: !Ref DBConnectionStringParameter
+
+  ReadReplicaEndpoint:
+    Condition: IsProduction
+    Description: Read Replica Endpoint
+    Value: !GetAtt DBReadReplica.Endpoint.Address

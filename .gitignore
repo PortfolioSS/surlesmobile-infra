@@ -1,0 +1,46 @@
+# AWS
+.aws/
+*.pem
+*.key
+
+# Terraform (if used)
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+*.auto.tfvars
+
+# CloudFormation
+cloudformation/parameters.json
+cloudformation/outputs.json
+cloudformation-outputs/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node modules (for any scripts)
+node_modules/
+npm-debug.log*
+
+# Temporary files
+temp/
+tmp/
+*.tmp

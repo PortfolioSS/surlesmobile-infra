@@ -1,0 +1,193 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'SurlesMobile Portfolio Infrastructure - Main Stack'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+  
+  ProjectName:
+    Type: String
+    Default: surlesmobile
+    Description: Project name for resource naming
+  
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: Password for RDS PostgreSQL instance
+    ConstraintDescription: Must be at least 8 characters long
+  
+  DomainName:
+    Type: String
+    Default: ''
+    Description: Domain name for CloudFront (optional)
+  
+  CertificateArn:
+    Type: String
+    Default: ''
+    Description: SSL Certificate ARN for CloudFront (optional)
+
+Conditions:
+  HasCustomDomain: !Not [!Equals [!Ref DomainName, '']]
+  HasCertificate: !Not [!Equals [!Ref CertificateArn, '']]
+  IsProduction: !Equals [!Ref Environment, 'prod']
+
+Resources:
+  # VPC Stack
+  VPCStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: vpc.yaml
+      Parameters:
+        Environment: !Ref Environment
+        ProjectName: !Ref ProjectName
+
+  # Security Stack
+  SecurityStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: security.yaml
+      Parameters:
+        Environment: !Ref Environment
+        ProjectName: !Ref ProjectName
+        VPCId: !GetAtt VPCStack.Outputs.VPCId
+
+  # Cognito Stack
+  CognitoStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: cognito.yaml
+      Parameters:
+        Environment: !Ref Environment
+        ProjectName: !Ref ProjectName
+
+  # RDS Stack
+  RDSStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: rds.yaml
+      Parameters:
+        Environment: !Ref Environment
+        ProjectName: !Ref ProjectName
+        VPCId: !GetAtt VPCStack.Outputs.VPCId
+        PrivateSubnetIds: !GetAtt VPCStack.Outputs.PrivateSubnetIds
+        DatabaseSecurityGroupId: !GetAtt SecurityStack.Outputs.DatabaseSecurityGroupId
+        DBPassword: !Ref DBPassword
+
+  # ECS Stack
+  ECSStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ecs.yaml
+      Parameters:
+        Environment: !Ref Environment
+        ProjectName: !Ref ProjectName
+        VPCId: !GetAtt VPCStack.Outputs.VPCId
+        PublicSubnetIds: !GetAtt VPCStack.Outputs.PublicSubnetIds
+        PrivateSubnetIds: !GetAtt VPCStack.Outputs.PrivateSubnetIds
+        ALBSecurityGroupId: !GetAtt SecurityStack.Outputs.ALBSecurityGroupId
+        ECSSecurityGroupId: !GetAtt SecurityStack.Outputs.ECSSecurityGroupId
+
+  # S3 and CloudFront Stack
+  CDNStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: cdn.yaml
+      Parameters:
+        Environment: !Ref Environment
+        ProjectName: !Ref ProjectName
+        DomainName: !Ref DomainName
+        CertificateArn: !Ref CertificateArn
+
+  # CloudWatch and Monitoring Stack
+  MonitoringStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: monitoring.yaml
+      Parameters:
+        Environment: !Ref Environment
+        ProjectName: !Ref ProjectName
+        DBInstanceId: !GetAtt RDSStack.Outputs.DBInstanceId
+        ECSClusterName: !GetAtt ECSStack.Outputs.ECSClusterName
+        ALBTargetGroupArn: !GetAtt ECSStack.Outputs.ALBTargetGroupArn
+
+Outputs:
+  # VPC Outputs
+  VPCId:
+    Description: VPC ID
+    Value: !GetAtt VPCStack.Outputs.VPCId
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-VPCId'
+
+  # Cognito Outputs
+  CognitoUserPoolId:
+    Description: Cognito User Pool ID
+    Value: !GetAtt CognitoStack.Outputs.UserPoolId
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-CognitoUserPoolId'
+
+  CognitoUserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !GetAtt CognitoStack.Outputs.UserPoolClientId
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-CognitoUserPoolClientId'
+
+  CognitoUserPoolArn:
+    Description: Cognito User Pool ARN
+    Value: !GetAtt CognitoStack.Outputs.UserPoolArn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-CognitoUserPoolArn'
+
+  # RDS Outputs
+  RDSEndpoint:
+    Description: RDS PostgreSQL Endpoint
+    Value: !GetAtt RDSStack.Outputs.DBEndpoint
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-RDSEndpoint'
+
+  RDSPort:
+    Description: RDS PostgreSQL Port
+    Value: !GetAtt RDSStack.Outputs.DBPort
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-RDSPort'
+
+  # ECS Outputs
+  ECSClusterName:
+    Description: ECS Cluster Name
+    Value: !GetAtt ECSStack.Outputs.ECSClusterName
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-ECSClusterName'
+
+  ALBDNSName:
+    Description: Application Load Balancer DNS Name
+    Value: !GetAtt ECSStack.Outputs.ALBDNSName
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-ALBDNSName'
+
+  ALBHostedZoneId:
+    Description: Application Load Balancer Hosted Zone ID
+    Value: !GetAtt ECSStack.Outputs.ALBHostedZoneId
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-ALBHostedZoneId'
+
+  # CloudFront Outputs
+  CloudFrontDomainName:
+    Description: CloudFront Distribution Domain Name
+    Value: !GetAtt CDNStack.Outputs.CloudFrontDomainName
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-CloudFrontDomainName'
+
+  CloudFrontDistributionId:
+    Description: CloudFront Distribution ID
+    Value: !GetAtt CDNStack.Outputs.CloudFrontDistributionId
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-CloudFrontDistributionId'
+
+  S3BucketName:
+    Description: S3 Bucket Name for Frontend Assets
+    Value: !GetAtt CDNStack.Outputs.S3BucketName
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-S3BucketName'

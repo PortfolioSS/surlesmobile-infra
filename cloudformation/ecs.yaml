@@ -1,0 +1,378 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ECS Fargate cluster with Application Load Balancer'
+
+Parameters:
+  Environment:
+    Type: String
+  ProjectName:
+    Type: String
+  VPCId:
+    Type: String
+  PublicSubnetIds:
+    Type: CommaDelimitedList
+  PrivateSubnetIds:
+    Type: CommaDelimitedList
+  ALBSecurityGroupId:
+    Type: String
+  ECSSecurityGroupId:
+    Type: String
+
+Mappings:
+  EnvironmentMap:
+    dev:
+      TaskCpu: 256
+      TaskMemory: 512
+      DesiredCount: 1
+      MinCapacity: 1
+      MaxCapacity: 2
+    staging:
+      TaskCpu: 512
+      TaskMemory: 1024
+      DesiredCount: 2
+      MinCapacity: 1
+      MaxCapacity: 4
+    prod:
+      TaskCpu: 1024
+      TaskMemory: 2048
+      DesiredCount: 3
+      MinCapacity: 2
+      MaxCapacity: 10
+
+Resources:
+  # ECS Cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${ProjectName}-${Environment}-cluster'
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 0
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-cluster'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-alb'
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets: !Ref PublicSubnetIds
+      SecurityGroups:
+        - !Ref ALBSecurityGroupId
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '60'
+        - Key: routing.http2.enabled
+          Value: 'true'
+        - Key: access_logs.s3.enabled
+          Value: 'false'
+        - Key: deletion_protection.enabled
+          Value: !If [IsProduction, 'true', 'false']
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-alb'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ALB Target Group
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-api-tg'
+      Port: 8080
+      Protocol: HTTP
+      VpcId: !Ref VPCId
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: 8080
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '30'
+        - Key: stickiness.enabled
+          Value: 'false'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-api-tg'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ALB Listener
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # CloudWatch Log Group
+  ECSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ProjectName}-${Environment}-api'
+      RetentionInDays: !If [IsProduction, 14, 7]
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-api-logs'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ECR Repository
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${ProjectName}-${Environment}-api'
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 production images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["prod"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Keep last 5 staging images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["staging"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": {
+                  "type": "expire"
+                }
+              },
+              {
+                "rulePriority": 3,
+                "description": "Keep last 3 dev images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["dev"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 3
+                },
+                "action": {
+                  "type": "expire"
+                }
+              },
+              {
+                "rulePriority": 4,
+                "description": "Delete untagged images older than 1 day",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 1
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-api'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ECS Task Definition
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-${Environment}-api'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !FindInMap [EnvironmentMap, !Ref Environment, TaskCpu]
+      Memory: !FindInMap [EnvironmentMap, !Ref Environment, TaskMemory]
+      ExecutionRoleArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-${Environment}-ecs-execution-role'
+      TaskRoleArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-${Environment}-ecs-task-role'
+      ContainerDefinitions:
+        - Name: api
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepository}:latest'
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          Environment:
+            - Name: ASPNETCORE_ENVIRONMENT
+              Value: !Ref Environment
+            - Name: ASPNETCORE_URLS
+              Value: 'http://+:8080'
+            - Name: AWS_REGION
+              Value: !Ref 'AWS::Region'
+            - Name: COGNITO_USER_POOL_ID
+              Value: !Sub '{{resolve:ssm:/${ProjectName}/${Environment}/cognito/user-pool-id}}'
+            - Name: COGNITO_CLIENT_ID
+              Value: !Sub '{{resolve:ssm:/${ProjectName}/${Environment}/cognito/client-id}}'
+          Secrets:
+            - Name: ConnectionStrings__DefaultConnection
+              ValueFrom: !Sub '/${ProjectName}/${Environment}/database/connection-string'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ECSLogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: api
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - 'curl -f http://localhost:8080/health || exit 1'
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-api-task'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ECS Service
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: ALBListener
+    Properties:
+      ServiceName: !Sub '${ProjectName}-${Environment}-api-service'
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref ECSTaskDefinition
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      DesiredCount: !FindInMap [EnvironmentMap, !Ref Environment, DesiredCount]
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref ECSSecurityGroupId
+          Subnets: !Ref PrivateSubnetIds
+      LoadBalancers:
+        - ContainerName: api
+          ContainerPort: 8080
+          TargetGroupArn: !Ref ALBTargetGroup
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      ServiceTags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-api-service'
+        - Key: Environment
+          Value: !Ref Environment
+      EnableExecuteCommand: true
+      PropagateTags: SERVICE
+
+  # Auto Scaling Target
+  AutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ResourceId: !Sub 'service/${ECSCluster}/${ECSService.Name}'
+      ScalableDimension: ecs:service:DesiredCount
+      MinCapacity: !FindInMap [EnvironmentMap, !Ref Environment, MinCapacity]
+      MaxCapacity: !FindInMap [EnvironmentMap, !Ref Environment, MaxCapacity]
+      RoleARN: !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService'
+
+  # Auto Scaling Policy - CPU
+  AutoScalingPolicyCPU:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-cpu-scaling'
+      PolicyType: TargetTrackingScaling
+      ServiceNamespace: ecs
+      ResourceId: !Sub 'service/${ECSCluster}/${ECSService.Name}'
+      ScalableDimension: ecs:service:DesiredCount
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 70.0
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleOutCooldown: 300
+        ScaleInCooldown: 300
+
+  # Auto Scaling Policy - Memory
+  AutoScalingPolicyMemory:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-memory-scaling'
+      PolicyType: TargetTrackingScaling
+      ServiceNamespace: ecs
+      ResourceId: !Sub 'service/${ECSCluster}/${ECSService.Name}'
+      ScalableDimension: ecs:service:DesiredCount
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 80.0
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        ScaleOutCooldown: 300
+        ScaleInCooldown: 300
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, 'prod']
+
+Outputs:
+  ECSClusterName:
+    Description: ECS Cluster Name
+    Value: !Ref ECSCluster
+
+  ECRRepositoryURI:
+    Description: ECR Repository URI
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepository}'
+
+  ALBDNSName:
+    Description: Application Load Balancer DNS Name
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+
+  ALBHostedZoneId:
+    Description: Application Load Balancer Hosted Zone ID
+    Value: !GetAtt ApplicationLoadBalancer.CanonicalHostedZoneID
+
+  ALBTargetGroupArn:
+    Description: ALB Target Group ARN
+    Value: !Ref ALBTargetGroup
+
+  ECSServiceName:
+    Description: ECS Service Name
+    Value: !Sub '${ECSService.Name}'
+
+  ECSTaskDefinitionArn:
+    Description: ECS Task Definition ARN
+    Value: !Ref ECSTaskDefinition

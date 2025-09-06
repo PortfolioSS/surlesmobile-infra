@@ -1,0 +1,33 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: RDS PostgreSQL for SurlesMobile
+Parameters:
+  DBName: { Type: String, Default: portfolio }
+  DBUser: { Type: String, Default: portfolio }
+  DBPassword: { Type: String, NoEcho: true }
+  VpcId: { Type: String }
+  Subnets: { Type: CommaDelimitedList }
+  SecurityGroupId: { Type: String }
+Resources:
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets for RDS
+      SubnetIds: !Ref Subnets
+      Tags: [{ Key: Name, Value: surlesmobile-rds-subnets }]
+  Postgres:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: !Ref DBName
+      DBInstanceClass: db.t4g.micro
+      Engine: postgres
+      AllocatedStorage: 20
+      MasterUsername: !Ref DBUser
+      MasterUserPassword: !Ref DBPassword
+      VPCSecurityGroups: [ !Ref SecurityGroupId ]
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      PubliclyAccessible: true
+      MultiAZ: false
+      DeletionProtection: false
+      Tags: [{ Key: Name, Value: surlesmobile-rds }]
+Outputs:
+  DbEndpoint: { Value: !GetAtt Postgres.Endpoint.Address }
