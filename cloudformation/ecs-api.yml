@@ -89,6 +89,12 @@ Resources:
       TargetType: ip
       VpcId: !Ref VpcId
       HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 60
+      HealthCheckTimeoutSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+      Matcher:
+        HttpCode: 200,404
   Listener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -104,6 +110,7 @@ Resources:
       LaunchType: FARGATE
       DesiredCount: 1
       TaskDefinition: !Ref TaskDef
+      HealthCheckGracePeriodSeconds: 300
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
